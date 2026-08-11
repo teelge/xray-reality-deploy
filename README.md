@@ -48,7 +48,7 @@ cat share-link.txt           # show the share link again
 
 - **Keys are generated fresh on each deploy** — nothing secret is stored in this repo.
 - `config.json` and `share-link.txt` are chmod 600 on the server. Anyone with the link gets full tunnel access — share it only over secure channels.
-- To revoke access, redeploy (regenerates all keys) or edit `config.json` to remove the client UUID.
+- To revoke access, use `xray-users revoke <label>` (or redeploy to regenerate all keys).
 
 ## Known pitfalls (learned the hard way)
 
@@ -56,12 +56,34 @@ cat share-link.txt           # show the share link again
 - Container logs print in Asia/Shanghai timezone — timestamps look 8h off but the clock is fine.
 - Debug handshakes: set `"loglevel": "debug"` and `"show": true` in `realitySettings`, then `docker compose up -d`.
 
-## Adding users
+## Managing users
+
+The `xray-users` CLI is installed automatically by `deploy.sh`.
+
+**Interactive mode** (menu, numbered user picker, confirmations):
 
 ```bash
-cd /opt/xray-reality
-bash add-user.sh              # auto label
-bash add-user.sh myfriend     # custom label
+xray-users
 ```
 
-Prints a new `vless://` share link for that user. All users share the same Reality keypair and disguise; each gets a unique UUID. Remove the link file line + the matching client entry in `config.json` to revoke one user.
+```
+  1) Add a new user
+  2) List users
+  3) Get share link
+  4) Revoke a user
+  5) Quit
+```
+
+**Non-interactive** (for scripting):
+
+```bash
+xray-users add myfriend          # create user, prints share link
+xray-users add                   # auto-labeled user
+xray-users list                  # show all users + UUIDs
+xray-users link myfriend         # print someone's share link again
+xray-users revoke myfriend       # remove user (works by label or UUID)
+```
+
+- Revoking is immediate — the container restarts and the old link stops working.
+- All users share the disguise/keypair; each has a unique UUID.
+- If deployed before this CLI existed: `cp xray-users /usr/local/bin/ && chmod +x /usr/local/bin/xray-users`

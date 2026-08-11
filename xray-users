@@ -2,10 +2,14 @@
 # ============================================================
 # xray-users — manage VLESS+Reality users on a running server
 #
-#   xray-users add [label]     create user, print share link
-#   xray-users list            show all users
-#   xray-users link <label|uuid>   print share link again
-#   xray-users revoke <label|uuid> remove user
+# Interactive:
+#   xray-users                  # menu-driven mode
+#
+# Non-interactive (scripting):
+#   xray-users add [label]      create user, print share link
+#   xray-users list             show all users
+#   xray-users link <label|uuid>    print share link again
+#   xray-users revoke <label|uuid>  remove user
 #
 # Env:
 #   DIR   install dir   (default /opt/xray-reality)
@@ -16,7 +20,9 @@ set -euo pipefail
 DIR="${DIR:-/opt/xray-reality}"
 NAME="${NAME:-xray-reality}"
 
-die() { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[1;34m[i]\033[0m %s\n' "$*"; }
+ok()   { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 
 CONFIG=""
 for c in "$DIR/config.json" "$DIR/xray/config.json"; do
@@ -34,8 +40,8 @@ get_pub() { # $1 = private key
 server_ip() { curl -sS -m 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'; }
 
 print_link() { # $1=uuid $2=label
-  local uuid="$1" label="$2" info
-  info="$(python3 - "$CONFIG" <<'PY'
+  local uuid="$1" label="$2" info_out
+  info_out="$(python3 - "$CONFIG" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 for ib in c["inbounds"]:
@@ -46,7 +52,7 @@ for ib in c["inbounds"]:
         break
 PY
 )" || die "no reality inbound found in config"
-  read -r PORT SNI SHORT_ID PRIV <<< "$info"
+  read -r PORT SNI SHORT_ID PRIV <<< "$info_out"
   local PUB; PUB="$(get_pub "$PRIV")"
   [ -n "$PUB" ] || die "failed to derive public key"
   local SPX SPX_ENC IP
@@ -78,7 +84,7 @@ PY
   docker restart "$NAME" >/dev/null
   sleep 2
   echo
-  echo "Added: $label ($uuid)"
+  ok "Added: $label ($uuid)"
   echo
   print_link "$uuid" "$label"
   echo
@@ -100,10 +106,8 @@ for ib in c["inbounds"]:
 PY
 }
 
-cmd_link() {
-  local who="${1:-}" uuid label
-  [ -n "$who" ] || die "usage: xray-users link <label|uuid>"
-  read -r uuid label <<< "$(python3 - "$CONFIG" "$who" <<'PY'
+resolve_user() { # $1 = label or uuid -> prints "uuid label"
+  python3 - "$CONFIG" "$1" <<'PY'
 import json, sys
 who = sys.argv[2]
 c = json.load(open(sys.argv[1]))
@@ -115,7 +119,12 @@ for ib in c["inbounds"]:
             print(cl["id"], cl.get("email", cl["id"]))
             break
 PY
-)"
+}
+
+cmd_link() {
+  local who="${1:-}" uuid label
+  [ -n "$who" ] || die "usage: xray-users link <label|uuid>"
+  read -r uuid label <<< "$(resolve_user "$who")"
   [ -n "${uuid:-}" ] || die "user '$who' not found"
   print_link "$uuid" "$label"
 }
@@ -144,16 +153,106 @@ PY
   [ -n "$removed" ] || die "user '$who' not found"
   docker restart "$NAME" >/dev/null
   sleep 2
-  echo "Revoked: $removed"
+  ok "Revoked: $removed"
 }
 
+# ---------- interactive helpers ----------
+
+pick_user() { # prints chosen "label" — numbered picker (menu drawn on stderr so $() captures only the label)
+  local labels=() i=1
+  while read -r l u; do
+    [ -n "$l" ] || continue
+    labels+=("$l")
+    printf '  %d) %s\n' "$i" "$l" >&2
+    i=$((i+1))
+  done < <(python3 - "$CONFIG" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+for ib in c["inbounds"]:
+    if ib.get("streamSettings", {}).get("security") == "reality":
+        for cl in ib["settings"].get("clients", []):
+            print(cl.get("email", cl["id"]), cl["id"])
+        break
+PY
+)
+  [ "${#labels[@]}" -gt 0 ] || { echo ""; return 1; }
+  local choice
+  while true; do
+    read -rp "Select user [1-$((i-1))] or q to cancel: " choice
+    [ "$choice" = "q" ] && { echo ""; return 1; }
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#labels[@]}" ]; then
+      echo "${labels[$((choice-1))]}"
+      return 0
+    fi
+    echo "  Please enter a number between 1 and ${#labels[@]}." >&2
+  done
+}
+
+confirm() { # $1 = prompt -> returns 0 if yes
+  local ans
+  read -rp "$1 [y/N]: " ans
+  [[ "$ans" =~ ^[Yy] ]]
+}
+
+interactive() {
+  while true; do
+    echo
+    echo "=================================="
+    echo "  XRay Reality — user management"
+    echo "=================================="
+    info "Container: $NAME  |  Config: $CONFIG"
+    echo "  1) Add a new user"
+    echo "  2) List users"
+    echo "  3) Get share link"
+    echo "  4) Revoke a user"
+    echo "  5) Quit"
+    echo "----------------------------------"
+    local choice
+    read -rp "Choose [1-5]: " choice
+    case "$choice" in
+      1)
+        local label
+        read -rp "Label for the new user (Enter = auto): " label
+        cmd_add "${label:-}"
+        ;;
+      2)
+        echo
+        cmd_list
+        ;;
+      3)
+        echo
+        local who; who="$(pick_user)" || continue
+        [ -n "$who" ] || { info "No users."; continue; }
+        echo
+        print_link "$(resolve_user "$who" | awk '{print $1}')" "$who"
+        echo
+        ;;
+      4)
+        echo
+        local who; who="$(pick_user)" || continue
+        [ -n "$who" ] || { info "No users."; continue; }
+        if confirm "Really revoke '$who'? Their link stops working immediately."; then
+          cmd_revoke "$who"
+        else
+          info "Cancelled."
+        fi
+        ;;
+      5) echo "Bye."; exit 0 ;;
+      *) info "Invalid choice." ;;
+    esac
+  done
+}
+
+# ---------- dispatch ----------
 case "${1:-}" in
+  "")    interactive ;;
   add)    cmd_add "${2:-}" ;;
   list|ls) cmd_list ;;
   link)   cmd_link "${2:-}" ;;
   revoke|rm|remove) cmd_revoke "${2:-}" ;;
   *)
-    echo "Usage: xray-users <add [label] | list | link <label|uuid> | revoke <label|uuid>>"
+    echo "Usage: xray-users [add [label] | list | link <label|uuid> | revoke <label|uuid>]"
+    echo "Run with no arguments for interactive mode."
     exit 1
     ;;
 esac
