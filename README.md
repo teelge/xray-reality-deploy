@@ -5,13 +5,13 @@ Self-deploying [XRay](https://github.com/XTLS/Xray-core) **VLESS + Reality** pro
 ## Deploy (fresh Ubuntu/Debian server, as root)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/xray-reality-deploy/main/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/teelge/xray-reality-deploy/main/deploy.sh | bash
 ```
 
 Or clone and run:
 
 ```bash
-git clone https://github.com/YOUR_USER/xray-reality-deploy.git
+git clone https://github.com/teelge/xray-reality-deploy.git
 cd xray-reality-deploy
 sudo bash deploy.sh
 ```
