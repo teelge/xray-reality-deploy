@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# ============================================================
+# xray-users — manage VLESS+Reality users on a running server
+#
+#   xray-users add [label]     create user, print share link
+#   xray-users list            show all users
+#   xray-users link <label|uuid>   print share link again
+#   xray-users revoke <label|uuid> remove user
+#
+# Env:
+#   DIR   install dir   (default /opt/xray-reality)
+#   NAME  container     (default xray-reality)
+# ============================================================
+set -euo pipefail
+
+DIR="${DIR:-/opt/xray-reality}"
+NAME="${NAME:-xray-reality}"
+
+die() { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
+
+CONFIG=""
+for c in "$DIR/config.json" "$DIR/xray/config.json"; do
+  [ -f "$c" ] && CONFIG="$c" && break
+done
+[ -n "$CONFIG" ] || die "config.json not found under $DIR (set DIR=...)"
+
+IMAGE_TAG="$(docker inspect "$NAME" --format '{{.Config.Image}}' 2>/dev/null || echo teddysun/xray:25.12.8)"
+
+get_pub() { # $1 = private key
+  docker run --rm "$IMAGE_TAG" xray x25519 -i "$1" 2>&1 \
+    | grep -i 'password' | grep -oE '[A-Za-z0-9_-]{40,}' | head -1
+}
+
+server_ip() { curl -sS -m 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'; }
+
+print_link() { # $1=uuid $2=label
+  local uuid="$1" label="$2" info
+  info="$(python3 - "$CONFIG" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+for ib in c["inbounds"]:
+    ss = ib.get("streamSettings", {})
+    if ss.get("security") == "reality":
+        rs = ss["realitySettings"]
+        print(ib["port"], rs["serverNames"][0], rs["shortIds"][0], rs["privateKey"])
+        break
+PY
+)" || die "no reality inbound found in config"
+  read -r PORT SNI SHORT_ID PRIV <<< "$info"
+  local PUB; PUB="$(get_pub "$PRIV")"
+  [ -n "$PUB" ] || die "failed to derive public key"
+  local SPX SPX_ENC IP
+  SPX="/$(openssl rand -hex 6)"
+  SPX_ENC="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$SPX")"
+  IP="$(server_ip)"
+  echo "vless://${uuid}@${IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&spx=${SPX_ENC}&type=tcp&headerType=none#${label}"
+}
+
+cmd_add() {
+  local label="${1:-user$(date +%s)}" uuid
+  uuid="$(python3 - "$CONFIG" "$label" <<'PY'
+import json, sys, uuid
+cfg, label = sys.argv[1], sys.argv[2]
+c = json.load(open(cfg))
+for ib in c["inbounds"]:
+    ss = ib.get("streamSettings", {})
+    if ss.get("security") == "reality":
+        for cl in ib["settings"].get("clients", []):
+            if cl.get("email") == label:
+                sys.exit(f"user '{label}' already exists")
+        new = {"id": str(uuid.uuid4()), "flow": "xtls-rprx-vision", "email": label}
+        ib["settings"].setdefault("clients", []).append(new)
+        json.dump(c, open(cfg, "w"), indent=2)
+        print(new["id"])
+        break
+PY
+)" || die "failed to add user (may already exist)"
+  docker restart "$NAME" >/dev/null
+  sleep 2
+  echo
+  echo "Added: $label ($uuid)"
+  echo
+  print_link "$uuid" "$label"
+  echo
+}
+
+cmd_list() {
+  python3 - "$CONFIG" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+for ib in c["inbounds"]:
+    ss = ib.get("streamSettings", {})
+    if ss.get("security") == "reality":
+        clients = ib["settings"].get("clients", [])
+        if not clients:
+            print("(no users)")
+        for cl in clients:
+            print(f"{cl.get('email','?'):20s} {cl['id']}")
+        break
+PY
+}
+
+cmd_link() {
+  local who="${1:-}" uuid label
+  [ -n "$who" ] || die "usage: xray-users link <label|uuid>"
+  read -r uuid label <<< "$(python3 - "$CONFIG" "$who" <<'PY'
+import json, sys
+who = sys.argv[2]
+c = json.load(open(sys.argv[1]))
+for ib in c["inbounds"]:
+    if ib.get("streamSettings", {}).get("security") != "reality":
+        continue
+    for cl in ib["settings"].get("clients", []):
+        if who in (cl.get("email", ""), cl["id"]):
+            print(cl["id"], cl.get("email", cl["id"]))
+            break
+PY
+)"
+  [ -n "${uuid:-}" ] || die "user '$who' not found"
+  print_link "$uuid" "$label"
+}
+
+cmd_revoke() {
+  local who="${1:-}" removed
+  [ -n "$who" ] || die "usage: xray-users revoke <label|uuid>"
+  removed="$(python3 - "$CONFIG" "$who" <<'PY'
+import json, sys
+who = sys.argv[2]
+cfg = sys.argv[1]
+c = json.load(open(cfg))
+found = None
+for ib in c["inbounds"]:
+    if ib.get("streamSettings", {}).get("security") != "reality":
+        continue
+    clients = ib["settings"].get("clients", [])
+    for cl in clients[:]:
+        if who in (cl.get("email", ""), cl["id"]):
+            clients.remove(cl)
+            found = cl.get("email", cl["id"])
+    json.dump(c, open(cfg, "w"), indent=2)
+print(found or "")
+PY
+)"
+  [ -n "$removed" ] || die "user '$who' not found"
+  docker restart "$NAME" >/dev/null
+  sleep 2
+  echo "Revoked: $removed"
+}
+
+case "${1:-}" in
+  add)    cmd_add "${2:-}" ;;
+  list|ls) cmd_list ;;
+  link)   cmd_link "${2:-}" ;;
+  revoke|rm|remove) cmd_revoke "${2:-}" ;;
+  *)
+    echo "Usage: xray-users <add [label] | list | link <label|uuid> | revoke <label|uuid>>"
+    exit 1
+    ;;
+esac

@@ -127,7 +127,20 @@ log "Starting container"
 sleep 2
 docker ps --format '{{.Names}} {{.Status}}' | grep -q "$NAME" || die "Container did not start. Check: docker logs $NAME"
 
-# ---------- 7. print results ----------
+# ---------- 7. install user management CLI ----------
+# Works via git clone (file next to script) or curl|bash (fetch from GitHub).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/xray-users" ]; then
+  install -m 755 "$SCRIPT_DIR/xray-users" /usr/local/bin/xray-users
+  log "Installed 'xray-users' CLI (add/list/link/revoke)"
+elif curl -fsSL -m 20 "https://raw.githubusercontent.com/teelge/xray-reality-deploy/main/xray-users" -o /usr/local/bin/xray-users 2>/dev/null; then
+  chmod 755 /usr/local/bin/xray-users
+  log "Installed 'xray-users' CLI from GitHub"
+else
+  warn "Could not install xray-users CLI (user management)"
+fi
+
+# ---------- 8. print results ----------
 SERVER_IP="$(curl -sS -m 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 SPX_ENC="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$SPIDER_X" 2>/dev/null || printf '%s' "$SPIDER_X")"
 LINK="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&spx=${SPX_ENC}&type=tcp&headerType=none"
