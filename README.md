@@ -55,3 +55,13 @@ cat share-link.txt           # show the share link again
 - **Client/server version mismatch**: a newer Xray server (26.x) may reject an older client's Reality handshake (`REALITY: processed invalid connection ... authentication failed`). This repo pins `25.12.8` (matches v2rayNG's core). If your client app uses a different core version, deploy with `XRAY_TAG=<version>`.
 - Container logs print in Asia/Shanghai timezone — timestamps look 8h off but the clock is fine.
 - Debug handshakes: set `"loglevel": "debug"` and `"show": true` in `realitySettings`, then `docker compose up -d`.
+
+## Adding users
+
+```bash
+cd /opt/xray-reality
+bash add-user.sh              # auto label
+bash add-user.sh myfriend     # custom label
+```
+
+Prints a new `vless://` share link for that user. All users share the same Reality keypair and disguise; each gets a unique UUID. Remove the link file line + the matching client entry in `config.json` to revoke one user.
