@@ -13,6 +13,7 @@
 #   XRAY_TAG   xray docker image tag      (default: 25.12.8)
 #   DIR        install directory          (default: /opt/xray-reality)
 #   NAME       container name             (default: xray-reality)
+#   TZ         timezone (default: auto-detect from host)
 # ============================================================
 set -euo pipefail
 
@@ -22,6 +23,17 @@ XRAY_TAG="${XRAY_TAG:-25.12.8}"
 DIR="${DIR:-/opt/xray-reality}"
 NAME="${NAME:-xray-reality}"
 IMAGE="teddysun/xray:${XRAY_TAG}"
+
+# Auto-detect timezone from host
+if [ -z "${TZ:-}" ]; then
+    if [ -f /etc/timezone ]; then
+        TZ="$(cat /etc/timezone)"
+    elif command -v timedatectl >/dev/null 2>&1; then
+        TZ="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    fi
+    # Fallback to UTC if detection fails
+    TZ="${TZ:-UTC}"
+fi
 
 log()  { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -73,7 +85,7 @@ SPIDER_X="/$(openssl rand -hex 6)"
 
 # ---------- 5. write configs ----------
 mkdir -p "$DIR"
-cat > "$DIR/config.json" <<EOF
+cat > "$DIR/config.json" <<EOFC
 {
   "log": { "loglevel": "warning" },
   "inbounds": [{
@@ -99,22 +111,25 @@ cat > "$DIR/config.json" <<EOF
   }],
   "outbounds": [{ "protocol": "freedom" }]
 }
-EOF
+EOFC
 
-cat > "$DIR/docker-compose.yml" <<EOF
+cat > "$DIR/docker-compose.yml" <<EOFC
 services:
   xray:
     image: $IMAGE
     container_name: $NAME
     restart: unless-stopped
+    environment:
+      - TZ=$TZ
     ports:
       - "$PORT:$PORT"
     volumes:
       - ./config.json:/etc/xray/config.json:ro
+      - /etc/localtime:/etc/localtime:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
-EOF
+EOFC
 chmod 600 "$DIR/config.json"
 
 # validate before starting
@@ -128,7 +143,6 @@ sleep 2
 docker ps --format '{{.Names}} {{.Status}}' | grep -q "$NAME" || die "Container did not start. Check: docker logs $NAME"
 
 # ---------- 7. install user management CLI ----------
-# Works via git clone (file next to script) or curl|bash (fetch from GitHub).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/xray-users" ]; then
   install -m 755 "$SCRIPT_DIR/xray-users" /usr/local/bin/xray-users
@@ -158,6 +172,7 @@ echo "$LINK"
 echo
 echo "=============================================="
 echo " Server:  $SERVER_IP:$PORT  (disguise: $DOMAIN)"
+echo " Timezone: $TZ"
 echo " Files:   $DIR/  (keep config.json secret!)"
 echo " Manage:  cd $DIR && docker compose restart|logs"
 echo "=============================================="
